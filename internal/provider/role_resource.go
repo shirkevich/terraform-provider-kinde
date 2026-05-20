@@ -6,7 +6,10 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 	"sort"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -29,6 +32,17 @@ func NewRoleResource() resource.Resource {
 type RoleResource struct {
 	client *roles.Client
 }
+
+type rolePermissionsPage struct {
+	Code        string             `json:"code"`
+	Message     string             `json:"message"`
+	NextToken   string             `json:"next_token"`
+	Permissions []roles.Permission `json:"permissions"`
+}
+
+func (p rolePermissionsPage) getData() []roles.Permission { return p.Permissions }
+
+func (p rolePermissionsPage) getNextToken() string { return p.NextToken }
 
 func (r *RoleResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_role"
@@ -102,7 +116,7 @@ func (r *RoleResource) Create(ctx context.Context, req resource.CreateRequest, r
 	}
 
 	// Get the complete role data
-	role, err = r.client.Get(ctx, role.ID)
+	role, err = r.getRole(ctx, role.ID)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Reading Created Role",
@@ -112,51 +126,25 @@ func (r *RoleResource) Create(ctx context.Context, req resource.CreateRequest, r
 	}
 
 	// Update permissions if specified
+	var planPerms []string
 	if !plan.Permissions.IsNull() {
-		var permissions []string
-		diags = plan.Permissions.ElementsAs(ctx, &permissions, false)
+		diags = plan.Permissions.ElementsAs(ctx, &planPerms, false)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
 
-		// Sort permissions for consistent ordering
-		sorted := make([]string, len(permissions))
-		copy(sorted, permissions)
-		sort.Strings(sorted)
-
-		permissionItems := make([]roles.UpdatePermissionItem, len(sorted))
-		for i, p := range sorted {
-			permissionItems[i] = roles.UpdatePermissionItem{
-				ID: p,
-			}
-		}
-
-		updatePermParams := roles.UpdatePermissionsParams{
-			Permissions: permissionItems,
-		}
-
-		_, err = r.client.UpdatePermissions(ctx, role.ID, updatePermParams)
+		role, err = r.reconcileRolePermissions(ctx, role.ID, role.Permissions, planPerms)
 		if err != nil {
 			resp.Diagnostics.AddError(
 				"Error Setting Role Permissions",
-				fmt.Sprintf("Could not set permissions for role: %s", err),
-			)
-			return
-		}
-
-		// Get the updated role to ensure we have all fields and permissions
-		role, err = r.client.Get(ctx, role.ID)
-		if err != nil {
-			resp.Diagnostics.AddError(
-				"Error Reading Updated Role",
-				fmt.Sprintf("Could not read updated role: %s", err),
+				fmt.Sprintf("Could not reconcile permissions for role %s: %s", role.ID, err),
 			)
 			return
 		}
 	}
 
-	state, err := flattenRoleResource(ctx, role, role.Permissions)
+	state, err := flattenRoleResource(ctx, role, sortPermissions(role.Permissions), plan.Permissions.IsNull())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Setting Role State",
@@ -185,7 +173,7 @@ func (r *RoleResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
-	role, err := r.client.Get(ctx, state.ID.ValueString())
+	role, err := r.getRole(ctx, state.ID.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Reading Role",
@@ -194,27 +182,13 @@ func (r *RoleResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
-	// Sort permissions without modifying original
-	sortedPerms := sortPermissions(role.Permissions)
-
-	// If no permissions are returned, explicitly set to null
-	var permissionsSet types.Set
-	if len(sortedPerms) > 0 {
-		permissionsSet, diags = types.SetValueFrom(ctx, types.StringType, sortedPerms)
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-	} else {
-		permissionsSet = types.SetNull(types.StringType)
-	}
-
-	state = RoleResourceModel{
-		ID:          types.StringValue(role.ID),
-		Name:        types.StringValue(role.Name),
-		Key:         types.StringValue(role.Key),
-		Description: types.StringValue(role.Description),
-		Permissions: permissionsSet,
+	state, err = flattenRoleResource(ctx, role, sortPermissions(role.Permissions), state.Permissions.IsNull())
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Error Setting Role State",
+			fmt.Sprintf("Could not set role state: %s", err),
+		)
+		return
 	}
 
 	diags = resp.State.Set(ctx, &state)
@@ -257,78 +231,8 @@ func (r *RoleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		}
 	}
 
-	// Get current permissions from state
-	var statePerms []string
-	if !state.Permissions.IsNull() {
-		diags = state.Permissions.ElementsAs(ctx, &statePerms, false)
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-	}
-
-	// First remove permissions that are in state but not in plan
-	for _, statePerm := range statePerms {
-		found := false
-		for _, planPerm := range planPerms {
-			if statePerm == planPerm {
-				found = true
-				break
-			}
-		}
-		if !found {
-			err = r.client.RemovePermission(ctx, plan.ID.ValueString(), statePerm)
-			if err != nil {
-				resp.Diagnostics.AddError(
-					"Error Removing Permission",
-					fmt.Sprintf("Could not remove permission %s from role %s: %s", statePerm, plan.ID.ValueString(), err),
-				)
-				return
-			}
-		}
-	}
-
-	// Then add any new permissions that are in plan but not in state
-	var permsToAdd []string
-	for _, planPerm := range planPerms {
-		found := false
-		for _, statePerm := range statePerms {
-			if planPerm == statePerm {
-				found = true
-				break
-			}
-		}
-		if !found {
-			permsToAdd = append(permsToAdd, planPerm)
-		}
-	}
-
-	if len(permsToAdd) > 0 {
-		// Sort permissions for consistent ordering
-		sortedPerms := sortPermissions(permsToAdd)
-		permissionItems := make([]roles.UpdatePermissionItem, len(sortedPerms))
-		for i, p := range sortedPerms {
-			permissionItems[i] = roles.UpdatePermissionItem{
-				ID: p,
-			}
-		}
-
-		updatePermParams := roles.UpdatePermissionsParams{
-			Permissions: permissionItems,
-		}
-
-		_, err = r.client.UpdatePermissions(ctx, plan.ID.ValueString(), updatePermParams)
-		if err != nil {
-			resp.Diagnostics.AddError(
-				"Error Adding Permissions",
-				fmt.Sprintf("Could not add permissions to role: %s", err),
-			)
-			return
-		}
-	}
-
 	// Get the updated role to ensure we have all fields and permissions
-	role, err := r.client.Get(ctx, plan.ID.ValueString())
+	role, err := r.getRole(ctx, plan.ID.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Reading Updated Role",
@@ -337,27 +241,24 @@ func (r *RoleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	// Sort permissions without modifying original before setting state
-	sortedPerms := sortPermissions(role.Permissions)
-
-	// If no permissions are returned, explicitly set to null
-	var permissionsSet types.Set
-	if len(sortedPerms) > 0 {
-		permissionsSet, diags = types.SetValueFrom(ctx, types.StringType, sortedPerms)
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
+	if !plan.Permissions.Equal(state.Permissions) {
+		role, err = r.reconcileRolePermissions(ctx, plan.ID.ValueString(), role.Permissions, planPerms)
+		if err != nil {
+			resp.Diagnostics.AddError(
+				"Error Updating Role Permissions",
+				fmt.Sprintf("Could not update permissions for role %s: %s", plan.ID.ValueString(), err),
+			)
 			return
 		}
-	} else {
-		permissionsSet = types.SetNull(types.StringType)
 	}
 
-	state = RoleResourceModel{
-		ID:          types.StringValue(role.ID),
-		Name:        types.StringValue(role.Name),
-		Key:         types.StringValue(role.Key),
-		Description: types.StringValue(role.Description),
-		Permissions: permissionsSet,
+	state, err = flattenRoleResource(ctx, role, sortPermissions(role.Permissions), plan.Permissions.IsNull())
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Error Setting Role State",
+			fmt.Sprintf("Could not set role state: %s", err),
+		)
+		return
 	}
 
 	diags = resp.State.Set(ctx, &state)
@@ -382,7 +283,7 @@ func (r *RoleResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 }
 
 func (r *RoleResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	role, err := r.client.Get(ctx, req.ID)
+	role, err := r.getRole(ctx, req.ID)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Reading Kinde Role",
@@ -394,7 +295,7 @@ func (r *RoleResource) ImportState(ctx context.Context, req resource.ImportState
 	// Sort the role's permissions for consistent ordering
 	sortedPermissions := sortStringSlice(role.Permissions)
 
-	state, err := flattenRoleResource(ctx, role, sortedPermissions)
+	state, err := flattenRoleResource(ctx, role, sortedPermissions, true)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Setting Role State",
@@ -404,4 +305,150 @@ func (r *RoleResource) ImportState(ctx context.Context, req resource.ImportState
 	}
 
 	resp.State.Set(ctx, &state)
+}
+
+func (r *RoleResource) getRole(ctx context.Context, id string) (*roles.Role, error) {
+	endpoint := fmt.Sprintf("/api/v1/roles/%s", id)
+	req, err := r.client.NewRequest(ctx, http.MethodGet, endpoint, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Code    string     `json:"code"`
+		Message string     `json:"message"`
+		Role    roles.Role `json:"role"`
+	}
+	if err := r.client.DoRequest(req, &response); err != nil {
+		return nil, err
+	}
+
+	permissions, err := r.getRolePermissions(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get role permissions: %w", err)
+	}
+	response.Role.Permissions = permissions
+
+	return &response.Role, nil
+}
+
+func (r *RoleResource) getRolePermissions(ctx context.Context, roleID string) ([]string, error) {
+	endpoint := fmt.Sprintf("/api/v1/roles/%s/permissions", roleID)
+	permissions, err := getAllPages[roles.Permission, rolePermissionsPage](ctx, r.client, endpoint, url.Values{
+		"page_size": []string{"10"},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	permissionIDs := make([]string, 0, len(permissions))
+	for _, permission := range permissions {
+		permissionIDs = append(permissionIDs, permission.ID)
+	}
+
+	return permissionIDs, nil
+}
+
+func buildRolePermissionOperations(current, desired []string) []roles.UpdatePermissionItem {
+	currentSet := make(map[string]struct{}, len(current))
+	for _, permissionID := range current {
+		currentSet[permissionID] = struct{}{}
+	}
+
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, permissionID := range desired {
+		desiredSet[permissionID] = struct{}{}
+	}
+
+	var operations []roles.UpdatePermissionItem
+
+	for _, permissionID := range sortPermissions(current) {
+		if _, keep := desiredSet[permissionID]; !keep {
+			operations = append(operations, roles.UpdatePermissionItem{
+				ID:        permissionID,
+				Operation: "delete",
+			})
+		}
+	}
+
+	for _, permissionID := range sortPermissions(desired) {
+		if _, alreadyPresent := currentSet[permissionID]; !alreadyPresent {
+			operations = append(operations, roles.UpdatePermissionItem{
+				ID: permissionID,
+			})
+		}
+	}
+
+	return operations
+}
+
+func rolePermissionsMatch(actual, desired []string) bool {
+	actualSorted := sortPermissions(actual)
+	desiredSorted := sortPermissions(desired)
+
+	if len(actualSorted) != len(desiredSorted) {
+		return false
+	}
+
+	for i := range actualSorted {
+		if actualSorted[i] != desiredSorted[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (r *RoleResource) reconcileRolePermissions(ctx context.Context, roleID string, current, desired []string) (*roles.Role, error) {
+	operations := buildRolePermissionOperations(current, desired)
+	if len(operations) > 0 {
+		_, err := r.client.UpdatePermissions(ctx, roleID, roles.UpdatePermissionsParams{
+			Permissions: operations,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return r.waitForRolePermissions(ctx, roleID, desired)
+}
+
+func (r *RoleResource) waitForRolePermissions(ctx context.Context, roleID string, desired []string) (*roles.Role, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastRole *roles.Role
+	var lastErr error
+
+	for {
+		role, err := r.getRole(waitCtx, roleID)
+		if err == nil {
+			lastRole = role
+			if rolePermissionsMatch(role.Permissions, desired) {
+				return role, nil
+			}
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-waitCtx.Done():
+			if lastRole != nil {
+				return nil, fmt.Errorf(
+					"timed out waiting for role permissions to converge for role %s: desired=%v observed=%v",
+					roleID,
+					sortPermissions(desired),
+					sortPermissions(lastRole.Permissions),
+				)
+			}
+			if lastErr != nil {
+				return nil, fmt.Errorf("timed out waiting to read updated role %s: %w", roleID, lastErr)
+			}
+			return nil, fmt.Errorf("timed out waiting for role permissions to converge for role %s", roleID)
+		case <-ticker.C:
+		}
+	}
 }

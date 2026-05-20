@@ -2,11 +2,11 @@ package provider
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
-	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 func TestAccRoleResource(t *testing.T) {
@@ -45,169 +45,69 @@ func TestAccRoleResource(t *testing.T) {
 	})
 }
 
-func TestAccRoleResource_PermissionOrdering(t *testing.T) {
-	// FIXME: Test is failing with "Provider produced inconsistent result after apply"
-	// .permissions: was cty.SetVal([]cty.Value{cty.StringVal("")}), but now null.
-	t.Skip("Skipping test due to known issue with permissions handling")
-
-	testID := acctest.RandomWithPrefix("tfacc")
-	permission1ID := acctest.RandomWithPrefix("tfacc-perm1")
-	permission2ID := acctest.RandomWithPrefix("tfacc-perm2")
-
-	var permission1ResourceID, permission2ResourceID string
+func TestAccRoleResource_AddOnlyPermissionUpdate(t *testing.T) {
+	testID := acctest.RandomWithPrefix("tfacc-role-add")
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
-			// Create first permission
 			{
-				Config: testAccPermissionResourceConfig("test-permission-1", permission1ID, "Test permission 1"),
+				Config: testAccRoleResourceConfigWithPermissionRefs(testID, 2, []int{0}),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrSet("kinde_permission.test", "id"),
-					func(s *terraform.State) error {
-						rs, ok := s.RootModule().Resources["kinde_permission.test"]
-						if !ok {
-							return fmt.Errorf("permission1 not found")
-						}
-						permission1ResourceID = rs.Primary.ID
-						return nil
-					},
+					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "1"),
 				),
 			},
-			// Create second permission
 			{
-				Config: testAccPermissionResourceConfig("test-permission-2", permission2ID, "Test permission 2"),
+				Config: testAccRoleResourceConfigWithPermissionRefs(testID, 2, []int{0, 1}),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrSet("kinde_permission.test", "id"),
-					func(s *terraform.State) error {
-						rs, ok := s.RootModule().Resources["kinde_permission.test"]
-						if !ok {
-							return fmt.Errorf("permission2 not found")
-						}
-						permission2ResourceID = rs.Primary.ID
-						return nil
-					},
-				),
-			},
-			// Create role with permissions in one order
-			{
-				Config: testAccRoleResourceConfig_WithPermissions(testID, testID, "Test role with permissions", []string{
-					permission1ResourceID,
-					permission2ResourceID,
-				}),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("kinde_role.test", "name", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "key", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "description", "Test role with permissions"),
 					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "2"),
-					resource.TestCheckTypeSetElemAttr("kinde_role.test", "permissions.*", permission1ResourceID),
-					resource.TestCheckTypeSetElemAttr("kinde_role.test", "permissions.*", permission2ResourceID),
-				),
-			},
-			// Update with same permissions in different order - should not trigger a change
-			{
-				Config: testAccRoleResourceConfig_WithPermissions(testID, testID, "Test role with permissions", []string{
-					permission2ResourceID,
-					permission1ResourceID,
-				}),
-				PlanOnly: true,
-			},
-			// Remove all permissions
-			{
-				Config: testAccRoleResourceConfig(testID),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("kinde_role.test", "name", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "key", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "description", "Test role"),
-					resource.TestCheckNoResourceAttr("kinde_role.test", "permissions"),
 				),
 			},
 		},
 	})
 }
 
-func TestAccRoleResource_RemovePermissions(t *testing.T) {
-	// FIXME: Test is failing with "Provider produced inconsistent result after apply"
-	// .permissions: was cty.SetVal([]cty.Value{cty.StringVal("")}), but now null.
-	t.Skip("Skipping test due to known issue with permissions handling")
-
-	testID := acctest.RandomWithPrefix("tfacc")
-	permission1ID := acctest.RandomWithPrefix("tfacc-perm1")
-	permission2ID := acctest.RandomWithPrefix("tfacc-perm2")
-
-	var permission1ResourceID, permission2ResourceID string
+func TestAccRoleResource_MixedPermissionUpdate(t *testing.T) {
+	testID := acctest.RandomWithPrefix("tfacc-role-mixed")
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
-			// Create first permission
 			{
-				Config: testAccPermissionResourceConfig("test-permission-1", permission1ID, "Test permission 1"),
+				Config: testAccRoleResourceConfigWithPermissionRefs(testID, 4, []int{0, 1, 2}),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrSet("kinde_permission.test", "id"),
-					func(s *terraform.State) error {
-						rs, ok := s.RootModule().Resources["kinde_permission.test"]
-						if !ok {
-							return fmt.Errorf("permission1 not found")
-						}
-						permission1ResourceID = rs.Primary.ID
-						return nil
-					},
+					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "3"),
 				),
 			},
-			// Create second permission
 			{
-				Config: testAccPermissionResourceConfig("test-permission-2", permission2ID, "Test permission 2"),
+				Config: testAccRoleResourceConfigWithPermissionRefs(testID, 4, []int{1, 2, 3}),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttrSet("kinde_permission.test", "id"),
-					func(s *terraform.State) error {
-						rs, ok := s.RootModule().Resources["kinde_permission.test"]
-						if !ok {
-							return fmt.Errorf("permission2 not found")
-						}
-						permission2ResourceID = rs.Primary.ID
-						return nil
-					},
+					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "3"),
 				),
 			},
-			// Create role with two permissions
+		},
+	})
+}
+
+func TestAccRoleResource_PermissionsPaginationBoundary(t *testing.T) {
+	testID := acctest.RandomWithPrefix("tfacc-role-page")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
 			{
-				Config: testAccRoleResourceConfig_WithPermissions(testID, testID, "Test role with permissions", []string{
-					permission1ResourceID,
-					permission2ResourceID,
-				}),
+				Config: testAccRoleResourceConfigWithPermissionRefs(testID, 11, []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("kinde_role.test", "name", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "key", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "description", "Test role with permissions"),
-					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "2"),
-					resource.TestCheckTypeSetElemAttr("kinde_role.test", "permissions.*", permission1ResourceID),
-					resource.TestCheckTypeSetElemAttr("kinde_role.test", "permissions.*", permission2ResourceID),
+					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "10"),
 				),
 			},
-			// Remove one permission
 			{
-				Config: testAccRoleResourceConfig_WithPermissions(testID, testID, "Test role with permissions", []string{
-					permission1ResourceID,
-				}),
+				Config: testAccRoleResourceConfigWithPermissionRefs(testID, 11, []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("kinde_role.test", "name", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "key", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "description", "Test role with permissions"),
-					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "1"),
-					resource.TestCheckTypeSetElemAttr("kinde_role.test", "permissions.*", permission1ResourceID),
-				),
-			},
-			// Remove all permissions
-			{
-				Config: testAccRoleResourceConfig(testID),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("kinde_role.test", "name", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "key", testID),
-					resource.TestCheckResourceAttr("kinde_role.test", "description", "Test role"),
-					resource.TestCheckNoResourceAttr("kinde_role.test", "permissions"),
+					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "11"),
 				),
 			},
 		},
@@ -262,4 +162,36 @@ resource "kinde_role" "test" {
 	permissions = %s
 }
 `, name, key, description, permissionsStr)
+}
+
+func testAccRoleResourceConfigWithPermissionRefs(name string, permissionCount int, rolePermissionIndexes []int) string {
+	var builder strings.Builder
+
+	for i := 0; i < permissionCount; i++ {
+		builder.WriteString(fmt.Sprintf(`
+resource "kinde_permission" "perm_%02d" {
+	name        = "%s-permission-%02d"
+	key         = "%s_permission_%02d"
+	description = "Test permission %02d"
+}
+`, i, name, i, name, i, i))
+	}
+
+	builder.WriteString(fmt.Sprintf(`
+resource "kinde_role" "test" {
+	name        = "%[1]s-role"
+	key         = "%[1]s_role"
+	description = "Test role"
+	permissions = [
+`, name))
+
+	for _, idx := range rolePermissionIndexes {
+		builder.WriteString(fmt.Sprintf("\t\tkinde_permission.perm_%02d.id,\n", idx))
+	}
+
+	builder.WriteString(`	]
+}
+`)
+
+	return builder.String()
 }

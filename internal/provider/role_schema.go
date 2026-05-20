@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/nxt-fwd/kinde-go/api/roles"
 	"github.com/nxt-fwd/terraform-provider-kinde/internal/serde"
@@ -46,16 +45,26 @@ func expandRoleUpdateParams(plan RoleResourceModel) roles.UpdateParams {
 	}
 }
 
-func flattenRoleResource(ctx context.Context, role *roles.Role, permissions []string) (RoleResourceModel, error) {
-	var permissionsSet types.Set
-	if len(permissions) > 0 {
-		var diags diag.Diagnostics
-		permissionsSet, diags = types.SetValueFrom(ctx, types.StringType, permissions)
-		if diags.HasError() {
-			return RoleResourceModel{}, fmt.Errorf("failed to flatten permissions: %v", diags)
-		}
-	} else {
-		permissionsSet = types.SetNull(types.StringType)
+func flattenRolePermissions(ctx context.Context, permissions []string, nullWhenEmpty bool) (types.Set, error) {
+	if len(permissions) == 0 && nullWhenEmpty {
+		return types.SetNull(types.StringType), nil
+	}
+	if permissions == nil {
+		permissions = []string{}
+	}
+
+	permissionsSet, diags := types.SetValueFrom(ctx, types.StringType, permissions)
+	if diags.HasError() {
+		return types.Set{}, fmt.Errorf("failed to flatten permissions: %v", diags)
+	}
+
+	return permissionsSet, nil
+}
+
+func flattenRoleResource(ctx context.Context, role *roles.Role, permissions []string, nullWhenEmpty bool) (RoleResourceModel, error) {
+	permissionsSet, err := flattenRolePermissions(ctx, permissions, nullWhenEmpty)
+	if err != nil {
+		return RoleResourceModel{}, err
 	}
 
 	return RoleResourceModel{

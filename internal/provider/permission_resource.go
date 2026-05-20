@@ -6,6 +6,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/url"
+
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -27,6 +29,17 @@ func NewPermissionResource() resource.Resource {
 type PermissionResource struct {
 	client *permissions.Client
 }
+
+type permissionsPage struct {
+	Code        string                   `json:"code"`
+	Message     string                   `json:"message"`
+	NextToken   string                   `json:"next_token"`
+	Permissions []permissions.Permission `json:"permissions"`
+}
+
+func (p permissionsPage) getData() []permissions.Permission { return p.Permissions }
+
+func (p permissionsPage) getNextToken() string { return p.NextToken }
 
 func (r *PermissionResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_permission"
@@ -123,10 +136,7 @@ func (r *PermissionResource) Read(ctx context.Context, req resource.ReadRequest,
 		return
 	}
 
-	// List all permissions with a larger page size
-	perms, err := r.client.List(ctx, permissions.ListParams{
-		PageSize: 100, // Use a larger page size to reduce pagination
-	})
+	perms, err := listAllPermissions(ctx, r.client)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Reading Permission",
@@ -219,10 +229,7 @@ func (r *PermissionResource) Delete(ctx context.Context, req resource.DeleteRequ
 }
 
 func (r *PermissionResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	// List all permissions with a larger page size to reduce API calls
-	perms, err := r.client.List(ctx, permissions.ListParams{
-		PageSize: 100, // Use a larger page size to reduce pagination
-	})
+	perms, err := listAllPermissions(ctx, r.client)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Reading Permission",
@@ -244,4 +251,8 @@ func (r *PermissionResource) ImportState(ctx context.Context, req resource.Impor
 		"Error Reading Permission",
 		fmt.Sprintf("Could not find permission with ID %s", req.ID),
 	)
+}
+
+func listAllPermissions(ctx context.Context, client *permissions.Client) ([]permissions.Permission, error) {
+	return getAllPages[permissions.Permission, permissionsPage](ctx, client, "/api/v1/permissions", url.Values{})
 }
