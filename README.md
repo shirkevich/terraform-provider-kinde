@@ -83,6 +83,10 @@ make testacc
 
 **Note:** Acceptance tests create real resources in your Kinde account. While most resources are cleaned up at the end of a test run, it's recommended to run these tests in a development account.
 
+### Releasing
+
+Release instructions are documented in [docs/releasing.md](./docs/releasing.md).
+
 ### Contributing
 
 1. Fork the repository
