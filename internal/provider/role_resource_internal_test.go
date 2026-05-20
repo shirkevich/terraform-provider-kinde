@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"testing"
 
@@ -134,8 +135,22 @@ func TestGetRoleUsesAllPermissionPages(t *testing.T) {
 		t.Fatalf("expected 11 permissions across pages, got %d: %#v", got, role.Permissions)
 	}
 
-	if want := []string{"page_size=10", "next_token=page-2&page_size=10"}; !reflect.DeepEqual(permissionRequests, want) {
-		t.Fatalf("unexpected permission pagination requests\nwant: %#v\n got: %#v", want, permissionRequests)
+	if len(permissionRequests) != 2 {
+		t.Fatalf("expected 2 permission requests, got %d: %#v", len(permissionRequests), permissionRequests)
+	}
+
+	wantQueries := []url.Values{
+		{"page_size": []string{"10"}},
+		{"page_size": []string{"10"}, "next_token": []string{"page-2"}},
+	}
+	for i, wantQuery := range wantQueries {
+		gotQuery, err := url.ParseQuery(permissionRequests[i])
+		if err != nil {
+			t.Fatalf("parse permission request query %q: %s", permissionRequests[i], err)
+		}
+		if !reflect.DeepEqual(gotQuery, wantQuery) {
+			t.Fatalf("unexpected permission request query %d\nwant: %#v\n got: %#v", i, wantQuery, gotQuery)
+		}
 	}
 }
 

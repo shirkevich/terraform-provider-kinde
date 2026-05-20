@@ -20,16 +20,17 @@ type kindePage[T any] interface {
 }
 
 func getAllPages[T any, P kindePage[T]](ctx context.Context, client kindeRequester, endpoint string, query url.Values) ([]T, error) {
-	if query == nil {
-		query = url.Values{}
+	localQuery := url.Values{}
+	for key, values := range query {
+		localQuery[key] = append([]string(nil), values...)
 	}
-	if query.Get("page_size") == "" {
-		query.Set("page_size", "100")
+	if localQuery.Get("page_size") == "" {
+		localQuery.Set("page_size", "100")
 	}
 
 	var results []T
 	for {
-		req, err := client.NewRequest(ctx, http.MethodGet, endpoint, query, nil)
+		req, err := client.NewRequest(ctx, http.MethodGet, endpoint, localQuery, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -44,7 +45,7 @@ func getAllPages[T any, P kindePage[T]](ctx context.Context, client kindeRequest
 		if nextToken == "" {
 			break
 		}
-		query.Set("next_token", nextToken)
+		localQuery.Set("next_token", nextToken)
 	}
 
 	return results, nil

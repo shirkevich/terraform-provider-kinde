@@ -7,6 +7,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 func TestAccRoleResource(t *testing.T) {
@@ -79,12 +80,14 @@ func TestAccRoleResource_MixedPermissionUpdate(t *testing.T) {
 				Config: testAccRoleResourceConfigWithPermissionRefs(testID, 4, []int{0, 1, 2}),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "3"),
+					testAccCheckRolePermissionRefs("kinde_role.test", []int{0, 1, 2}),
 				),
 			},
 			{
 				Config: testAccRoleResourceConfigWithPermissionRefs(testID, 4, []int{1, 2, 3}),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("kinde_role.test", "permissions.#", "3"),
+					testAccCheckRolePermissionRefs("kinde_role.test", []int{1, 2, 3}),
 				),
 			},
 		},
@@ -194,4 +197,38 @@ resource "kinde_role" "test" {
 `)
 
 	return builder.String()
+}
+
+func testAccCheckRolePermissionRefs(roleResourceName string, indexes []int) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		role, ok := s.RootModule().Resources[roleResourceName]
+		if !ok {
+			return fmt.Errorf("role resource %s not found", roleResourceName)
+		}
+
+		actualPermissions := map[string]struct{}{}
+		for key, value := range role.Primary.Attributes {
+			if strings.HasPrefix(key, "permissions.") && key != "permissions.#" {
+				actualPermissions[value] = struct{}{}
+			}
+		}
+
+		for _, idx := range indexes {
+			permissionName := fmt.Sprintf("kinde_permission.perm_%02d", idx)
+			permission, ok := s.RootModule().Resources[permissionName]
+			if !ok {
+				return fmt.Errorf("permission resource %s not found", permissionName)
+			}
+
+			if _, ok := actualPermissions[permission.Primary.ID]; !ok {
+				return fmt.Errorf("role %s is missing permission %s (%s)", roleResourceName, permissionName, permission.Primary.ID)
+			}
+		}
+
+		if len(actualPermissions) != len(indexes) {
+			return fmt.Errorf("role %s has %d permissions, expected %d", roleResourceName, len(actualPermissions), len(indexes))
+		}
+
+		return nil
+	}
 }

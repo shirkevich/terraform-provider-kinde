@@ -308,7 +308,7 @@ func (r *RoleResource) ImportState(ctx context.Context, req resource.ImportState
 }
 
 func (r *RoleResource) getRole(ctx context.Context, id string) (*roles.Role, error) {
-	endpoint := fmt.Sprintf("/api/v1/roles/%s", id)
+	endpoint := fmt.Sprintf("/api/v1/roles/%s", url.PathEscape(id))
 	req, err := r.client.NewRequest(ctx, http.MethodGet, endpoint, nil, nil)
 	if err != nil {
 		return nil, err
@@ -333,7 +333,7 @@ func (r *RoleResource) getRole(ctx context.Context, id string) (*roles.Role, err
 }
 
 func (r *RoleResource) getRolePermissions(ctx context.Context, roleID string) ([]string, error) {
-	endpoint := fmt.Sprintf("/api/v1/roles/%s/permissions", roleID)
+	endpoint := fmt.Sprintf("/api/v1/roles/%s/permissions", url.PathEscape(roleID))
 	permissions, err := getAllPages[roles.Permission, rolePermissionsPage](ctx, r.client, endpoint, url.Values{
 		"page_size": []string{"10"},
 	})
